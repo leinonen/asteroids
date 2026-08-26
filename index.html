@@ -1,0 +1,535 @@
+<title>Asteroids</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  body{display:grid;place-items:center;color:#8fa;font:13px ui-monospace,monospace}
+  #gl,#fallback{width:min(100vw,calc(100vh*4/3));height:auto;display:block;image-rendering:auto}
+  #fallback{display:none}
+  #hint{position:fixed;bottom:4px;left:0;right:0;text-align:center;opacity:.35;letter-spacing:.1em;font-size:11px;pointer-events:none}
+  #gl,#fallback{width:min(100vw,calc((100vh - 24px)*4/3))}
+</style>
+<canvas id="gl" width="800" height="600"></canvas>
+<canvas id="fallback" width="800" height="600"></canvas>
+<p id="hint">&larr;&rarr; rotate &middot; &uarr; thrust &middot; space fire &middot; enter start &middot; M mute</p>
+<script>
+'use strict';
+// ---------------------------------------------------------------- constants
+const W = 800, H = 600;
+const STEP = 1 / 120;
+const SHIP_R = 11, SHIP_TURN = 4.2, SHIP_THRUST = 260, SHIP_MAX = 420, SHIP_DRAG = 0.55;
+const BULLET_SPEED = 520, BULLET_TTL = 1.1, MAX_BULLETS = 4;
+const ROCK = { 3: { r: 46, v: [30, 70], pts: 20 }, 2: { r: 26, v: [55, 115], pts: 50 }, 1: { r: 13, v: [90, 170], pts: 100 } };
+const RESPAWN_DELAY = 2, INVULN = 3;
+
+// ---------------------------------------------------------------- scene canvas (2D, offscreen)
+const scene = document.createElement('canvas');
+scene.width = W; scene.height = H;
+const ctx = scene.getContext('2d');
+
+// ---------------------------------------------------------------- vector font (x 0..4, y 0..6, y down)
+const FONT = {
+  A: [[0,6,0,2,2,0,4,2,4,6],[0,3,4,3]],
+  B: [[0,0,0,6,3,6,4,5,4,4,3,3,0,3],[3,3,4,2,4,1,3,0,0,0]],
+  C: [[4,1,3,0,1,0,0,1,0,5,1,6,3,6,4,5]],
+  D: [[0,0,0,6,3,6,4,5,4,1,3,0,0,0]],
+  E: [[4,0,0,0,0,6,4,6],[0,3,3,3]],
+  F: [[4,0,0,0,0,6],[0,3,3,3]],
+  G: [[4,1,3,0,1,0,0,1,0,5,1,6,3,6,4,5,4,3,2,3]],
+  H: [[0,0,0,6],[4,0,4,6],[0,3,4,3]],
+  I: [[1,0,3,0],[2,0,2,6],[1,6,3,6]],
+  J: [[4,0,4,5,3,6,1,6,0,5]],
+  K: [[0,0,0,6],[4,0,0,3,4,6]],
+  L: [[0,0,0,6,4,6]],
+  M: [[0,6,0,0,2,3,4,0,4,6]],
+  N: [[0,6,0,0,4,6,4,0]],
+  O: [[1,0,3,0,4,1,4,5,3,6,1,6,0,5,0,1,1,0]],
+  P: [[0,6,0,0,3,0,4,1,4,2,3,3,0,3]],
+  Q: [[1,0,3,0,4,1,4,5,3,6,1,6,0,5,0,1,1,0],[2,4,4,6]],
+  R: [[0,6,0,0,3,0,4,1,4,2,3,3,0,3],[2,3,4,6]],
+  S: [[4,1,3,0,1,0,0,1,0,2,1,3,3,3,4,4,4,5,3,6,1,6,0,5]],
+  T: [[0,0,4,0],[2,0,2,6]],
+  U: [[0,0,0,5,1,6,3,6,4,5,4,0]],
+  V: [[0,0,2,6,4,0]],
+  W: [[0,0,0,6,2,3,4,6,4,0]],
+  X: [[0,0,4,6],[4,0,0,6]],
+  Y: [[0,0,2,3,4,0],[2,3,2,6]],
+  Z: [[0,0,4,0,0,6,4,6]],
+  0: [[1,0,3,0,4,1,4,5,3,6,1,6,0,5,0,1,1,0],[0,5,4,1]],
+  1: [[1,1,2,0,2,6],[1,6,3,6]],
+  2: [[0,1,1,0,3,0,4,1,4,2,0,6,4,6]],
+  3: [[0,0,4,0,2,3,4,4,4,5,3,6,1,6,0,5]],
+  4: [[3,6,3,0,0,4,4,4]],
+  5: [[4,0,0,0,0,3,3,3,4,4,4,5,3,6,0,6]],
+  6: [[4,0,1,0,0,1,0,5,1,6,3,6,4,5,4,4,3,3,0,3]],
+  7: [[0,0,4,0,1,6]],
+  8: [[1,0,3,0,4,1,4,2,3,3,1,3,0,2,0,1,1,0],[1,3,0,4,0,5,1,6,3,6,4,5,4,4,3,3]],
+  9: [[4,3,1,3,0,2,0,1,1,0,3,0,4,1,4,5,3,6,0,6]],
+  '-': [[0,3,4,3]], '.': [[2,5,2,6]], ':': [[2,1,2,2],[2,4,2,5]], '!': [[2,0,2,4],[2,5,2,6]], ' ': [],
+};
+
+function drawText(str, x, y, size, align = 'left', color = '#cfe') {
+  str = str.toUpperCase();
+  const adv = size * 1.5, total = str.length * adv - size * 0.5;
+  if (align === 'center') x -= total / 2; else if (align === 'right') x -= total;
+  ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.2, size / 8);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const ch of str) {
+    const g = FONT[ch] || FONT[' '];
+    for (const seg of g) {
+      ctx.beginPath();
+      for (let i = 0; i < seg.length; i += 2) {
+        const px = x + seg[i] / 4 * size, py = y + seg[i + 1] / 6 * size * 1.4;
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+      ctx.stroke();
+    }
+    x += adv;
+  }
+}
+
+// ---------------------------------------------------------------- helpers
+const rnd = (a, b) => a + Math.random() * (b - a);
+const wrap = o => {
+  if (o.x < 0) o.x += W; else if (o.x >= W) o.x -= W;
+  if (o.y < 0) o.y += H; else if (o.y >= H) o.y -= H;
+};
+const dist2 = (a, b) => {
+  let dx = Math.abs(a.x - b.x), dy = Math.abs(a.y - b.y);
+  if (dx > W / 2) dx = W - dx; if (dy > H / 2) dy = H - dy;   // toroidal distance
+  return dx * dx + dy * dy;
+};
+const hit = (a, ra, b, rb) => dist2(a, b) < (ra + rb) * (ra + rb);
+
+// ---------------------------------------------------------------- game state
+let state = 'title', score = 0, lives = 0, level = 0, hiscore = +localStorage.asteroidsHi || 0;
+let ship = null, respawnTimer = 0, asteroids = [], bullets = [], particles = [], debris = [];
+let keys = {}, pressed = {}, time = 0;
+
+function newShip() {
+  return { x: W / 2, y: H / 2, vx: 0, vy: 0, a: -Math.PI / 2, thrust: false, invuln: INVULN };
+}
+
+function makeAsteroid(x, y, size) {
+  const n = 10 + (Math.random() * 5 | 0), shape = [], base = ROCK[size].r;
+  for (let i = 0; i < n; i++) shape.push(base * rnd(0.55, 1.15));
+  const sp = rnd(...ROCK[size].v), dir = rnd(0, Math.PI * 2);
+  return { x, y, vx: Math.cos(dir) * sp, vy: Math.sin(dir) * sp, size, r: base * 0.9, shape, a: rnd(0, 6.28), va: rnd(-1.2, 1.2) };
+}
+
+function spawnLevel() {
+  asteroids = [];
+  const n = 3 + level;
+  for (let i = 0; i < n; i++) {
+    let x, y;
+    do { x = rnd(0, W); y = rnd(0, H); } while (dist2({ x, y }, ship || { x: W / 2, y: H / 2 }) < 180 * 180);
+    asteroids.push(makeAsteroid(x, y, 3));
+  }
+}
+
+function startGame() {
+  score = 0; lives = 3; level = 0; bullets = []; particles = []; debris = [];
+  ship = newShip(); spawnLevel(); state = 'playing'; audio.beatTimer = 0;
+}
+
+function explode(x, y, n, sp, color) {
+  for (let i = 0; i < n; i++) {
+    const d = rnd(0, 6.28), s = rnd(sp * 0.2, sp);
+    particles.push({ x, y, vx: Math.cos(d) * s, vy: Math.sin(d) * s, ttl: rnd(0.3, 0.9), max: 0.9, color });
+  }
+}
+
+function killShip() {
+  explode(ship.x, ship.y, 20, 180, '#8ff');
+  const pts = SHIP_SHAPE;
+  for (let i = 0; i < pts.length; i++) {              // ship falls apart into its own segments
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    const ca = Math.cos(ship.a), sa = Math.sin(ship.a);
+    const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2;
+    debris.push({
+      x: ship.x + mx * ca - my * sa, y: ship.y + mx * sa + my * ca,
+      vx: ship.vx * 0.3 + rnd(-40, 40), vy: ship.vy * 0.3 + rnd(-40, 40),
+      a: ship.a, va: rnd(-3, 3), len: Math.hypot(q[0] - p[0], q[1] - p[1]),
+      sa: Math.atan2(q[1] - p[1], q[0] - p[0]), ttl: 2.5,
+    });
+  }
+  audio.explode(3); audio.thrust(false);
+  ship = null; lives--; respawnTimer = RESPAWN_DELAY;
+  if (lives < 0) { state = 'gameover'; if (score > hiscore) { hiscore = score; localStorage.asteroidsHi = hiscore; } }
+}
+
+function addScore(n) {
+  const before = score / 10000 | 0;
+  score += n;
+  if ((score / 10000 | 0) > before) lives++;
+}
+
+// ---------------------------------------------------------------- update
+function update(dt) {
+  time += dt;
+  if (state !== 'playing' && (pressed.Enter || pressed.Space && state === 'title')) { startGame(); pressed = {}; }
+
+  if (ship) {
+    if (keys.ArrowLeft) ship.a -= SHIP_TURN * dt;
+    if (keys.ArrowRight) ship.a += SHIP_TURN * dt;
+    ship.thrust = !!keys.ArrowUp;
+    if (ship.thrust) {
+      ship.vx += Math.cos(ship.a) * SHIP_THRUST * dt;
+      ship.vy += Math.sin(ship.a) * SHIP_THRUST * dt;
+      if (Math.random() < 0.5) particles.push({           // exhaust sparks
+        x: ship.x - Math.cos(ship.a) * 8, y: ship.y - Math.sin(ship.a) * 8,
+        vx: ship.vx - Math.cos(ship.a) * rnd(80, 160) + rnd(-30, 30),
+        vy: ship.vy - Math.sin(ship.a) * rnd(80, 160) + rnd(-30, 30),
+        ttl: rnd(0.15, 0.35), max: 0.35, color: '#fa6',
+      });
+    }
+    audio.thrust(ship.thrust);
+    const drag = Math.pow(SHIP_DRAG, dt);
+    ship.vx *= drag; ship.vy *= drag;
+    const sp = Math.hypot(ship.vx, ship.vy);
+    if (sp > SHIP_MAX) { ship.vx *= SHIP_MAX / sp; ship.vy *= SHIP_MAX / sp; }
+    ship.x += ship.vx * dt; ship.y += ship.vy * dt; wrap(ship);
+    ship.invuln = Math.max(0, ship.invuln - dt);
+
+    if (pressed.Space && bullets.length < MAX_BULLETS) {
+      bullets.push({
+        x: ship.x + Math.cos(ship.a) * 14, y: ship.y + Math.sin(ship.a) * 14,
+        vx: ship.vx + Math.cos(ship.a) * BULLET_SPEED, vy: ship.vy + Math.sin(ship.a) * BULLET_SPEED, ttl: BULLET_TTL,
+      });
+      audio.fire(); pressed.Space = false;             // one bullet per tap, even across substeps
+    }
+  } else if (state === 'playing') {
+    respawnTimer -= dt;
+    const clear = asteroids.every(a => dist2(a, { x: W / 2, y: H / 2 }) > 130 * 130);
+    if (respawnTimer <= 0 && clear) ship = newShip();
+  }
+
+  for (const a of asteroids) { a.x += a.vx * dt; a.y += a.vy * dt; a.a += a.va * dt; wrap(a); }
+  for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; b.ttl -= dt; wrap(b); }
+  bullets = bullets.filter(b => b.ttl > 0);
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.ttl -= dt; wrap(p); }
+  particles = particles.filter(p => p.ttl > 0);
+  for (const d of debris) { d.x += d.vx * dt; d.y += d.vy * dt; d.a += d.va * dt; d.ttl -= dt; wrap(d); }
+  debris = debris.filter(d => d.ttl > 0);
+
+  // bullets vs asteroids
+  for (const b of bullets) {
+    for (let i = asteroids.length - 1; i >= 0; i--) {
+      const a = asteroids[i];
+      if (hit(b, 1, a, a.r)) {
+        b.ttl = 0; splitAsteroid(i); break;
+      }
+    }
+  }
+  bullets = bullets.filter(b => b.ttl > 0);
+
+  // ship vs asteroids
+  if (ship && ship.invuln <= 0) {
+    for (let i = asteroids.length - 1; i >= 0; i--) {
+      if (hit(ship, SHIP_R * 0.8, asteroids[i], asteroids[i].r)) { splitAsteroid(i); killShip(); break; }
+    }
+  }
+
+  if (state === 'playing' && asteroids.length === 0 && ship) { level++; spawnLevel(); }
+  audio.update(dt);
+}
+
+function splitAsteroid(i) {
+  const a = asteroids[i];
+  asteroids.splice(i, 1);
+  addScore(ROCK[a.size].pts);
+  explode(a.x, a.y, 6 + a.size * 4, 60 + a.size * 30, '#dfe');
+  audio.explode(a.size);
+  if (a.size > 1) for (let k = 0; k < 2; k++) {
+    const c = makeAsteroid(a.x, a.y, a.size - 1);
+    c.vx += a.vx * 0.4; c.vy += a.vy * 0.4;
+    asteroids.push(c);
+  }
+}
+
+// ---------------------------------------------------------------- render (2D scene)
+const SHIP_SHAPE = [[14, 0], [-10, 10], [-6, 4], [-6, -4], [-10, -10]];
+
+function poly(pts, x, y, a, color, close = true) {
+  const ca = Math.cos(a), sa = Math.sin(a);
+  ctx.strokeStyle = color; ctx.beginPath();
+  pts.forEach(([px, py], i) => {
+    const X = x + px * ca - py * sa, Y = y + px * sa + py * ca;
+    i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+  });
+  if (close) ctx.closePath();
+  ctx.stroke();
+}
+
+function drawShip(x, y, a, thrust, color = '#aff') {
+  ctx.lineWidth = 1.6; ctx.lineJoin = 'round';
+  poly(SHIP_SHAPE, x, y, a, color);
+  if (thrust && Math.random() < 0.8) {
+    const f = rnd(10, 18);
+    poly([[-6, 4], [-6 - f, 0], [-6, -4]], x, y, a, '#fc8', false);
+  }
+}
+
+function render() {
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.lineCap = 'round';
+
+  for (const a of asteroids) {
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#e4f0ff'; ctx.beginPath();
+    const n = a.shape.length;
+    for (let i = 0; i <= n; i++) {
+      const t = a.a + (i % n) / n * Math.PI * 2, r = a.shape[i % n];
+      const X = a.x + Math.cos(t) * r, Y = a.y + Math.sin(t) * r;
+      i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y);
+    }
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#fff';
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 1.8, 0, 6.28); ctx.fill(); }
+
+  for (const p of particles) {
+    ctx.globalAlpha = Math.min(1, p.ttl / p.max * 1.5);
+    ctx.strokeStyle = p.color; ctx.lineWidth = 1.4; ctx.beginPath();
+    ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const d of debris) {
+    ctx.globalAlpha = Math.min(1, d.ttl); ctx.strokeStyle = '#aff'; ctx.lineWidth = 1.6;
+    const t = d.a + d.sa, hx = Math.cos(t) * d.len / 2, hy = Math.sin(t) * d.len / 2;
+    ctx.beginPath(); ctx.moveTo(d.x - hx, d.y - hy); ctx.lineTo(d.x + hx, d.y + hy); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  if (ship && (ship.invuln <= 0 || Math.floor(time * 10) % 2)) drawShip(ship.x, ship.y, ship.a, ship.thrust);
+
+  // HUD
+  if (state !== 'title') {
+    drawText(String(score).padStart(2, '0'), 20, 18, 18);
+    for (let i = 0; i < lives; i++) drawShip(30 + i * 24, 58, -Math.PI / 2, false, '#8cd');
+  }
+  drawText('HI ' + hiscore, W - 20, 18, 14, 'right', '#9bc');
+
+  if (state === 'title') {
+    drawText('ASTEROIDS', W / 2, 200, 48, 'center', '#dff');
+    if (Math.floor(time * 2) % 2) drawText('PRESS ENTER', W / 2, 330, 18, 'center');
+    drawText('ARROWS ROTATE THRUST - SPACE FIRE', W / 2, 400, 11, 'center', '#7a9');
+  } else if (state === 'gameover') {
+    drawText('GAME OVER', W / 2, 240, 40, 'center', '#fcc');
+    drawText('SCORE ' + score, W / 2, 320, 16, 'center');
+    if (Math.floor(time * 2) % 2) drawText('PRESS ENTER', W / 2, 380, 14, 'center', '#9bc');
+  }
+}
+
+// ---------------------------------------------------------------- WebGL glow post-process
+const glCanvas = document.getElementById('gl');
+const gl = glCanvas.getContext('webgl', { antialias: false, premultipliedAlpha: false });
+let post = null;
+
+const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = p*0.5+0.5; gl_Position = vec4(p,0.,1.); }`;
+const FS_COPY = `precision mediump float; varying vec2 uv; uniform sampler2D t;
+  void main(){ vec3 c = texture2D(t,uv).rgb; gl_FragColor = vec4(max(c - 0.15, 0.0) * 1.3, 1.); }`;
+const FS_BLUR = `precision mediump float; varying vec2 uv; uniform sampler2D t; uniform vec2 dir;
+  void main(){
+    float w[5]; w[0]=0.227; w[1]=0.194; w[2]=0.121; w[3]=0.054; w[4]=0.016;
+    vec3 c = texture2D(t,uv).rgb * w[0];
+    for (int i = 1; i < 5; i++) {
+      vec2 o = dir * float(i) * 1.5;
+      c += texture2D(t, uv + o).rgb * w[i];
+      c += texture2D(t, uv - o).rgb * w[i];
+    }
+    gl_FragColor = vec4(c, 1.);
+  }`;
+const FS_COMPOSE = `precision mediump float; varying vec2 uv;
+  uniform sampler2D scene, bloom, prev;
+  void main(){
+    vec3 s = texture2D(scene, uv).rgb;
+    vec3 b = texture2D(bloom, uv).rgb;
+    vec3 p = texture2D(prev, uv).rgb;
+    vec3 c = s + b * 1.6 + p * 0.45;
+    gl_FragColor = vec4(c, 1.);
+  }`;
+const FS_PRESENT = `precision mediump float; varying vec2 uv; uniform sampler2D t; uniform vec2 res; uniform float time;
+  void main(){
+    vec2 d = (uv - 0.5) * 0.004;
+    float r = texture2D(t, uv + d).r;
+    float g = texture2D(t, uv).g;
+    float b = texture2D(t, uv - d).b;
+    vec3 c = vec3(r, g, b);
+    c *= 0.92 + 0.08 * sin(uv.y * res.y * 3.14159);           // scanlines
+    vec2 q = uv * (1.0 - uv);
+    c *= pow(q.x * q.y * 16.0, 0.18);                            // vignette
+    c += 0.012 * fract(sin(dot(uv * time, vec2(12.9898, 78.233))) * 43758.5453); // faint noise
+    c = c / (1.0 + c * 0.25);                                     // soft tone-map
+    gl_FragColor = vec4(c, 1.);
+  }`;
+
+function initGL() {
+  if (!gl) return false;
+  const compile = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const program = fs => {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  };
+  const tex = (w, h) => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+  const fbo = (w, h) => {
+    const t = tex(w, h), f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    return { f, t, w, h };
+  };
+
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+  const bw = W / 2, bh = H / 2;
+  post = {
+    copy: program(FS_COPY), blur: program(FS_BLUR), compose: program(FS_COMPOSE), present: program(FS_PRESENT),
+    sceneTex: tex(W, H),
+    bright: fbo(bw, bh), pingA: fbo(bw, bh), pingB: fbo(bw, bh),
+    hist: [fbo(W, H), fbo(W, H)], frame: 0, quad,
+  };
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  return true;
+}
+
+function draw(prog, target, binds, uniforms) {
+  gl.useProgram(prog);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.f : null);
+  gl.viewport(0, 0, target ? target.w : W, target ? target.h : H);
+  binds.forEach(([name, t], i) => {
+    gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.uniform1i(gl.getUniformLocation(prog, name), i);
+  });
+  if (uniforms) uniforms(gl, prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, post.quad);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function postProcess() {
+  const P = post, bw = P.bright.w, bh = P.bright.h;
+  gl.bindTexture(gl.TEXTURE_2D, P.sceneTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, scene);
+
+  draw(P.copy, P.bright, [['t', P.sceneTex]]);
+  let src = P.bright;
+  for (let i = 0; i < 2; i++) {                       // two blur iterations for wide halo
+    draw(P.blur, P.pingA, [['t', src.t]], (gl, p) => gl.uniform2f(gl.getUniformLocation(p, 'dir'), 1 / bw, 0));
+    draw(P.blur, P.pingB, [['t', P.pingA.t]], (gl, p) => gl.uniform2f(gl.getUniformLocation(p, 'dir'), 0, 1 / bh));
+    src = P.pingB;
+  }
+
+  const cur = P.hist[P.frame & 1], prev = P.hist[(P.frame + 1) & 1];
+  draw(P.compose, cur, [['scene', P.sceneTex], ['bloom', src.t], ['prev', prev.t]]);
+  draw(P.present, null, [['t', cur.t]], (gl, p) => {
+    gl.uniform2f(gl.getUniformLocation(p, 'res'), W, H);
+    gl.uniform1f(gl.getUniformLocation(p, 'time'), time % 100);
+  });
+  P.frame++;
+}
+
+// ---------------------------------------------------------------- fallback (no WebGL)
+const fb = document.getElementById('fallback'), fbctx = fb.getContext('2d');
+function fallbackPresent() {
+  fbctx.fillStyle = '#000'; fbctx.fillRect(0, 0, W, H);
+  fbctx.shadowColor = '#8ff'; fbctx.shadowBlur = 14;
+  fbctx.drawImage(scene, 0, 0);
+  fbctx.shadowBlur = 0; fbctx.globalAlpha = 0.7; fbctx.drawImage(scene, 0, 0); fbctx.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- audio
+const audio = {
+  ctx: null, muted: false, thrustGain: null, beatTimer: 0, beatHi: false,
+  init() {
+    if (this.ctx) return;
+    const A = this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = this.master = A.createGain(); master.gain.value = 0.5; master.connect(A.destination);
+    const buf = A.createBuffer(1, A.sampleRate, A.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    this.noise = buf;
+    const src = A.createBufferSource(); src.buffer = buf; src.loop = true;
+    const lp = A.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 400;
+    const g = this.thrustGain = A.createGain(); g.gain.value = 0;
+    src.connect(lp); lp.connect(g); g.connect(master); src.start();
+  },
+  on() { return this.ctx && !this.muted; },
+  thrust(active) {
+    if (!this.on()) return;
+    this.thrustGain.gain.setTargetAtTime(active ? 0.35 : 0, this.ctx.currentTime, 0.05);
+  },
+  fire() {
+    if (!this.on()) return;
+    const A = this.ctx, o = A.createOscillator(), g = A.createGain(), t = A.currentTime;
+    o.type = 'sawtooth'; o.frequency.setValueAtTime(900, t); o.frequency.exponentialRampToValueAtTime(120, t + 0.18);
+    g.gain.setValueAtTime(0.25, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.2);
+  },
+  explode(size) {
+    if (!this.on()) return;
+    const A = this.ctx, s = A.createBufferSource(), f = A.createBiquadFilter(), g = A.createGain(), t = A.currentTime;
+    s.buffer = this.noise; f.type = 'lowpass';
+    const dur = 0.25 + size * 0.15;
+    f.frequency.setValueAtTime(1500 / size, t); f.frequency.exponentialRampToValueAtTime(60, t + dur);
+    g.gain.setValueAtTime(0.4 + size * 0.1, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    s.connect(f); f.connect(g); g.connect(this.master); s.start(t); s.stop(t + dur);
+  },
+  beat() {
+    if (!this.on()) return;
+    const A = this.ctx, o = A.createOscillator(), g = A.createGain(), t = A.currentTime;
+    o.type = 'square'; o.frequency.value = this.beatHi ? 62 : 50;
+    g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.12);
+    this.beatHi = !this.beatHi;
+  },
+  update(dt) {
+    if (state !== 'playing') return;
+    const total = (3 + level) * 7, left = asteroids.reduce((n, a) => n + (a.size === 3 ? 7 : a.size === 2 ? 3 : 1), 0);
+    const interval = 0.25 + 0.75 * Math.min(1, left / total);
+    this.beatTimer += dt;
+    if (this.beatTimer >= interval) { this.beatTimer = 0; this.beat(); }
+  },
+};
+
+// ---------------------------------------------------------------- input + loop
+addEventListener('keydown', e => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  if (!keys[e.code]) pressed[e.code] = true;   // edge-trigger, survives taps shorter than a frame
+  keys[e.code] = true;
+  audio.init();
+  if (e.code === 'KeyM') { audio.muted = !audio.muted; if (audio.muted) audio.thrust(false); }
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('blur', () => { keys = {}; });
+
+let useGL = false;
+try { useGL = initGL(); } catch (e) { console.warn('WebGL glow unavailable, using fallback:', e); }
+if (!useGL) { glCanvas.style.display = 'none'; fb.style.display = 'block'; }
+
+let last = performance.now(), acc = 0;
+function frame(now) {
+  acc += Math.min(0.1, (now - last) / 1000); last = now;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  pressed = {};
+  render();
+  useGL ? postProcess() : fallbackPresent();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
